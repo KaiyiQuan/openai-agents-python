@@ -4,7 +4,7 @@ from collections import OrderedDict
 import pytest
 
 from agents.exceptions import UserError
-from agents.strict_schema import ensure_strict_json_schema
+from agents.strict_schema import ensure_strict_json_schema, resolve_ref
 
 
 def _nested_object_schema(depth: int) -> dict[str, object]:
@@ -74,6 +74,45 @@ def test_reasonably_nested_schema_remains_supported():
 def test_deeply_chained_refs_are_rejected_before_recursive_conversion():
     with pytest.raises(UserError, match="too deeply nested"):
         ensure_strict_json_schema(_chained_ref_schema(1_000))
+
+
+def test_resolve_ref_decodes_percent_encoded_fragment_keys():
+    """URI-fragment percent-encoding must be decoded before JSON Pointer lookup.
+
+    Regression for #5254: `#/$defs/a%20b` raised KeyError when only the
+    decoded key `a b` existed, and silently resolved to a different existing
+    schema when both an encoded and a literal-percent name coexisted.
+    """
+    root = {
+        "$defs": {
+            "A B": {"type": "string"},
+            "A%B": {"type": "integer"},  # literal percent name, only via %25
+            "café": {"type": "string"},
+            "a/b": {"type": "string"},  # ~1 escape, must keep working
+            "A+B": {"type": "string"},  # + is not a space in URI fragments
+        },
+        "type": "object",
+    }
+
+    # `%20` decodes to a space: must hit the decoded key, not the literal name.
+    assert resolve_ref(root=root, ref="#/$defs/A%20B") == {"type": "string"}
+    # UTF-8 percent-encoded Unicode key.
+    assert resolve_ref(root=root, ref="#/$defs/caf%C3%A9") == {"type": "string"}
+    # ~1 escapes are applied after percent-decoding and keep working.
+    assert resolve_ref(root=root, ref="#/$defs/a~1b") == {"type": "string"}
+    # A literal `+` in the key must not be treated as a space (unquote, not unquote_plus).
+    assert resolve_ref(root=root, ref="#/$defs/A+B") == {"type": "string"}
+    # A literal percent sign in the key must be reachable via `%25` (unquote
+    # decodes `%25` to `%`, leaving the literal name intact).
+    assert resolve_ref(root=root, ref="#/$defs/A%25B") == {"type": "integer"}
+
+
+def test_resolve_ref_rejects_invalid_utf8_escape():
+    """Percent-encoded octets that are not valid UTF-8 must fail loudly
+    (errors="strict") instead of resolving as a literal key."""
+    root = {"$defs": {"a\ufffd": {"type": "string"}}}
+    with pytest.raises(UnicodeDecodeError):
+        resolve_ref(root=root, ref="#/$defs/a%FF")
 
 
 def test_object_without_additional_properties():

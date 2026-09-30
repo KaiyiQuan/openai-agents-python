@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from typing import Any, TypeGuard, cast
+from urllib.parse import unquote
 
 from openai import NOT_GIVEN
 
@@ -415,7 +416,13 @@ def resolve_ref(*, root: dict[str, object], ref: str) -> object:
     if not ref.startswith("#/"):
         raise ValueError(f"Unexpected $ref format {ref!r}; Does not start with #/")
 
-    path = ref[2:].split("/")
+    # `ref` is a URI fragment: percent-encoded octets (e.g. `A%20B`, `caf%C3%A9`)
+    # must be decoded to the actual key before JSON Pointer resolution, otherwise
+    # valid references raise KeyError or silently resolve to a different existing
+    # schema when encoded and literal-percent names coexist. We intentionally use
+    # `unquote` (not `unquote_plus`): `+` is not a space in URI fragments, and
+    # `errors="strict"` surfaces malformed escapes instead of swallowing them.
+    path = unquote(ref[2:], errors="strict").split("/")
     resolved = root
     for raw_key in path:
         key = raw_key.replace("~1", "/").replace("~0", "~")
